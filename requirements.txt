@@ -1,0 +1,12 @@
+# Core libraries
+requests
+sqlalchemy
+pandas
+
+# For reading .env files
+python-dotenv
+
+# Database driver for PostgreSQL (if using Supabase/Neon)
+psycopg2-binary
+
+fyers-apiv3
