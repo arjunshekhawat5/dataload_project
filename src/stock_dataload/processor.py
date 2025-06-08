@@ -1,9 +1,10 @@
 import logging
-from datetime import datetime
-from sqlalchemy import select
+from datetime import datetime, date, timedelta
+from sqlalchemy import select, func
 
-from ..database.models import Security, SecuritiesEquityMeta, SecuritiesDerivativeMeta
+from ..database.models import Security, SecuritiesEquityMeta, SecuritiesDerivativeMeta, DailyPriceHistory
 from ..database.manager import DatabaseManager
+from .api_client import FyersApiClient
 
 logger = logging.getLogger(__name__)
 
@@ -189,3 +190,58 @@ def process_derivative_master(data: dict, exchange: str, segment: str, db_manage
         logger.info("All new derivatives processed in memory. Committing to database...")
         session.commit()
         logger.info(f"Successfully committed {total_new} new derivatives to the database.")
+    
+
+def fetch_and_store_daily_history(
+    security: Security,
+    db_manager: DatabaseManager,
+    fyers_client: FyersApiClient
+):
+    """
+    Performs an incremental fetch of daily price history for a single security.
+    """
+    with db_manager.Session() as session:
+        # 1. Find the last date we have data for this security
+        stmt = select(func.max(DailyPriceHistory.price_date)).where(DailyPriceHistory.security_id == security.id)
+        last_sync_date = session.execute(stmt).scalar_one_or_none()
+
+    # 2. Determine the date range for the API call
+    if last_sync_date:
+        start_date = last_sync_date + timedelta(days=1)
+    else:
+        # If no data exists, fetch the last 10 years
+        start_date = date.today() - timedelta(days=365 * 10)
+    
+    end_date = date.today()
+    
+    if start_date > end_date:
+        logger.info(f"Daily data for {security.symbol} is already up to date.")
+        return
+
+    # 3. Call the Fyers API
+    history_data = fyers_client.get_daily_history(
+        symbol=security.symbol,
+        range_from=start_date.strftime('%Y-%m-%d'),
+        range_to=end_date.strftime('%Y-%m-%d')
+    )
+
+    if not history_data:
+        logger.warning(f"No new daily data returned for {security.symbol}.")
+        return
+
+    # 4. Prepare data for bulk insert
+    records_to_insert = []
+    for candle in history_data:
+        # Fyers history format: [timestamp, open, high, low, close, volume]
+        records_to_insert.append({
+            'security_id': security.id,
+            'price_date': datetime.fromtimestamp(candle[0]).date(),
+            'open': candle[1],
+            'high': candle[2],
+            'low': candle[3],
+            'close': candle[4],
+            'volume': candle[5]
+        })
+    
+    if records_to_insert:
+        db_manager.bulk_insert(DailyPriceHistory, records_to_insert)

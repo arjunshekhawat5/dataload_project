@@ -6,7 +6,8 @@ pandas
 # For reading .env files
 python-dotenv
 
-# Database driver for PostgreSQL (if using Supabase/Neon)
+# Database driver for PostgreSQL
 psycopg2-binary
 
+# Fyers API v3 SDK
 fyers-apiv3
