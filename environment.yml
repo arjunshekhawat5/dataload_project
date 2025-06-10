@@ -9,3 +9,8 @@ dependencies:
   - requests
   - sqlalchemy
   - pip
+  - python-dotenv
+  - psycopg2-binary
+  - pandas
+  - pip:
+    - fyers-apiv3
