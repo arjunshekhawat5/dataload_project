@@ -3,11 +3,9 @@ from src.common.logger import setup_logger
 import os
 from pathlib import Path
 
-# Import the two main functions from our stock dataload module
 from src.stock_dataload.run_symbol_sync import run_symbol_master_sync
 from src.stock_dataload.run_price_loader import run_price_history_load
 
-# Setup a main logger for this orchestrator script
 log_file_path = Path("logs/stock_dataload_orchestrator.log")
 log_file_path.parent.mkdir(parents=True, exist_ok=True)
 setup_logger("stock_orchestrator", log_file_path)

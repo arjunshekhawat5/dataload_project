@@ -7,7 +7,7 @@ import logging
 from ..common.logger import setup_logger
 from ..database.manager import DatabaseManager
 from .api_client import StockApiClient
-from .processor import SymbolMasterLoader  # <-- Import the new CLASS
+from .processor import SymbolMasterLoader
 
 load_dotenv()
 
