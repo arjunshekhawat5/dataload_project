@@ -1,62 +1,65 @@
-import configparser
-from pathlib import Path
 import os
 from dotenv import load_dotenv
 from sqlalchemy import select
+import configparser
+from pathlib import Path
 
-from src.common.logger import setup_logger
+from ..common.logger import setup_logger
 from ..database.manager import DatabaseManager
 from ..database.models import Security
 from .api_client import FyersApiClient
-from .processor import fetch_and_store_daily_history
+from .processor import PriceHistoryProcessor
 
 load_dotenv()
 
-def run_price_history_load():
-    """
-    Main function to run the daily price history dataload for all relevant securities.
-    """
-    # --- Setup and DB Connection ---
+def main():
+    # --- Setup ---
     project_root = Path(__file__).resolve().parent.parent.parent
-    config_path = project_root / "config" / "config.ini"
     config = configparser.ConfigParser()
-    config.read(config_path)
+    config.read(project_root / "config" / "config.ini")
     
     log_file_path = project_root / "logs/price_history_loader.log"
-    log_file_path.parent.mkdir(parents=True, exist_ok=True)
-    logger = setup_logger('price_loader', log_file_path, config['LOGGING']['log_level'])
+    logger = setup_logger('price_loader', log_file_path)
 
-    conn_str_template = config['DATABASE']['connection_string']
-    db_connection_string = os.path.expandvars(conn_str_template)
+    db_connection_string = os.path.expandvars(config['DATABASE']['connection_string'])
 
     # --- Initialization ---
     db_manager = DatabaseManager(db_connection_string)
-    fyers_client = FyersApiClient(
-        client_id=os.getenv("FYERS_CLIENT_ID"),
-        access_token=os.getenv("FYERS_ACCESS_TOKEN")
-    )
-    logger.info("--- Starting Daily Price History Dataload ---")
+    try:
+        fyers_client = FyersApiClient(
+            client_id=os.getenv("FYERS_CLIENT_ID"),
+            access_token=os.getenv("FYERS_ACCESS_TOKEN")
+        )
+    except Exception as e:
+        logger.error(f"Initialization failed: {e}")
+        return
+
+    processor = PriceHistoryProcessor(db_manager, fyers_client)
 
     # --- Dataload Logic ---
     with db_manager.Session() as session:
-        # Fetch all active securities that we want price history for
-        stmt = select(Security).where(
-            Security.security_type.in_(['EQUITY', 'FUTURE', 'ETF', 'INDEX']),
+        securities_to_load = session.query(Security).filter(
+            Security.security_type.in_(['EQUITY', 'FUTURE', 'INDEX']),
             Security.valid_to.is_(None)
-        ).order_by(Security.symbol)
-        securities_to_load = session.execute(stmt).scalars().all()
+        ).all()
 
-    total_securities = len(securities_to_load)
-    logger.info(f"Found {total_securities} active securities to update.")
+    logger.info(f"Found {len(securities_to_load)} active securities to process.")
 
+    # --- STAGE 1: Fetch Source-of-Truth Data (Daily and 1-Minute) ---
+    logger.info("--- STAGE 1: Fetching Daily and 1-Minute data ---")
     for i, security in enumerate(securities_to_load):
-        logger.info(f"Processing {i + 1}/{total_securities}: {security.symbol}")
-        try:
-            fetch_and_store_daily_history(security, db_manager, fyers_client)
-        except Exception as e:
-            logger.error(f"Failed to process {security.symbol} due to an unexpected error: {e}")
+        logger.info(f"--- Processing {i + 1}/{len(securities_to_load)}: {security.symbol} ---")
+        processor.load_history(security, "D")
+        processor.load_history(security, "1")
 
-    logger.info("--- Daily Price History Dataload Finished ---")
+    # --- STAGE 2: Implement Hybrid Approach (Pre-aggregate common timeframes) ---
+    logger.info("--- STAGE 2: Resampling to create aggregated timeframes ---")
+    for i, security in enumerate(securities_to_load):
+        logger.info(f"--- Aggregating {i + 1}/{len(securities_to_load)}: {security.symbol} ---")
+        for tf in ["5min", "15min", "60min"]:
+            processor.resample_history(security, tf)
 
-if __name__ == '__main__':
-    run_price_history_load()
+    logger.info("--- Price History Dataload Finished ---")
+
+if __name__ == "__main__":
+    main()
