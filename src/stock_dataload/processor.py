@@ -1,11 +1,10 @@
 import logging
 from datetime import datetime, date, timedelta
 import time
-import pandas as pd
 from sqlalchemy import select
 
-from ..database.manager import DatabaseManager
-from ..database.models import (
+from src.database.manager import DatabaseManager
+from src.database.models import (
     Security,
     DailyPriceHistory,
     OneMinuteHistory,
@@ -13,7 +12,8 @@ from ..database.models import (
     SecuritiesDerivativeMeta,
     AggregatedIntradayHistory,
 )
-from .api_client import FyersApiClient
+from src.stock_dataload.api_client import FyersApiClient
+from src.stock_dataload.data_fetcher import HistoricalDataFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -161,115 +161,52 @@ class SymbolMasterLoader:
             session.commit()
 
 
-class PriceHistoryProcessor:
-    def __init__(self, db_manager: DatabaseManager, fyers_client: FyersApiClient):
+class PriceHistoryLoader:
+    def __init__(self, db_manager: DatabaseManager, data_fetcher: HistoricalDataFetcher):
         self.db_manager = db_manager
-        self.fyers_client = fyers_client
-        logger.info("PriceHistoryProcessor initialized.")
+        self.data_fetcher = data_fetcher
+        logger.info("PriceHistoryLoader initialized.")
 
-    def load_history(self, security: Security, timeframe: str):
+    def load_history_for_security(self, security: Security, timeframe: str):
         """
-        The main modular function. Handles both initial bulk loads and incremental updates
-        for any timeframe by processing data in memory-efficient chunks.
+        Orchestrates the incremental loading of history for a single security.
         """
-        logger.info(
-            f"Starting history load for {security.symbol}, timeframe '{timeframe}'..."
-        )
+        logger.info(f"Processing '{timeframe}' data for {security.symbol}...")
 
-        # 1. Determine target table, last sync time, and chunk size
+        # 1. Determine target table and find the last update time
         if timeframe == "D":
             target_model = DailyPriceHistory
             last_update = self.db_manager.get_last_daily_update(security.id)
-            days_per_chunk = 365 * 2
-            max_lookback_days = 365 * 20
-            start_date = (
-                last_update + timedelta(days=1)
-                if last_update
-                else date.today() - timedelta(days=max_lookback_days)
-            )
+            start_date = (last_update + timedelta(days=1)).date() if last_update else date.today() - timedelta(
+                days=365 * 20)
         elif timeframe == "1":
             target_model = OneMinuteHistory
             last_update = self.db_manager.get_last_intraday_update(security.id)
-            days_per_chunk = 60
-            max_lookback_days = 365 * 7
-            start_date = (
-                last_update + timedelta(minutes=1)
-                if last_update
-                else datetime.now() - timedelta(days=max_lookback_days)
-            )
+            start_date = last_update + timedelta(minutes=1) if last_update else datetime.now() - timedelta(days=365 * 7)
         else:
-            logger.error(
-                f"Timeframe '{timeframe}' is not supported for direct fetching."
-            )
             return
 
-        end_date = datetime.now()
-        if not isinstance(start_date, datetime):
-            end_date = end_date.date()
-
-        if start_date >= end_date:
-            logger.info(
-                f"Data for {security.symbol} ({timeframe}) is already up to date."
-            )
+        end_date = datetime.now().date()
+        if start_date > end_date:
+            logger.info(f"Data for {security.symbol} ({timeframe}) is already up to date.")
             return
 
-        # 2. Loop backward in chunks, fetching and storing each one immediately
-        current_to_date = end_date
-        while current_to_date > start_date:
-            chunk_from_date = current_to_date - timedelta(days=days_per_chunk)
-            if chunk_from_date < start_date:
-                chunk_from_date = start_date
+        # 2. Use the fetcher to get all new data
+        new_data = self.data_fetcher.get_history(security.symbol, timeframe, start_date, end_date)
 
-            if chunk_from_date >= current_to_date:
-                break
+        if not new_data:
+            logger.info(f"No new '{timeframe}' data found for {security.symbol}.")
+            return
 
-            logger.info(
-                f"Fetching chunk for {security.symbol} ({timeframe}) from {chunk_from_date.strftime('%Y-%m-%d')} to {current_to_date.strftime('%Y-%m-%d')}"
-            )
+        # 3. Prepare and store the data
+        records_to_insert = []
+        for candle in new_data:
+            record = {'security_id': security.id, 'open': candle[1], 'high': candle[2], 'low': candle[3],
+                      'close': candle[4], 'volume': candle[5]}
+            if timeframe == "D":
+                record['price_date'] = datetime.fromtimestamp(candle[0]).date()
+            else:
+                record['price_timestamp'] = datetime.fromtimestamp(candle[0])
+            records_to_insert.append(record)
 
-            chunk_data = self.fyers_client.fetch_history_chunk(
-                security.symbol,
-                timeframe,
-                chunk_from_date.strftime("%Y-%m-%d"),
-                current_to_date.strftime("%Y-%m-%d"),
-            )
-
-            if not chunk_data:
-                logger.info(
-                    f"No more data found before {current_to_date.strftime('%Y-%m-%d')}. Stopping."
-                )
-                break
-
-            # Process and store this chunk immediately
-            records_to_insert = []
-            for candle in chunk_data:
-                record = {
-                    "security_id": security.id,
-                    "open": candle[1],
-                    "high": candle[2],
-                    "low": candle[3],
-                    "close": candle[4],
-                    "volume": candle[5],
-                }
-                if timeframe == "D":
-                    record["price_date"] = datetime.fromtimestamp(candle[0]).date()
-                else:
-                    record["price_timestamp"] = datetime.fromtimestamp(candle[0])
-                records_to_insert.append(record)
-
-            self.db_manager.bulk_insert(target_model, records_to_insert)
-
-            current_to_date = chunk_from_date
-            time.sleep(0.5)
-
-    def resample_history(self, security: Security, target_timeframe: str):
-        """
-        Implements the hybrid approach. Reads 1-min data and creates aggregated candles.
-        """
-        logger.info(
-            f"Resampling 1-min data to '{target_timeframe}' for {security.symbol}..."
-        )
-        # This logic can be implemented here, querying the DB for new 1-min data,
-        # using pandas to resample, and bulk inserting into AggregatedIntradayHistory.
-        # For now, we'll leave it as a placeholder.
-        pass
+        self.db_manager.bulk_insert(target_model, records_to_insert)

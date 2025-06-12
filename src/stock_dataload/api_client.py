@@ -2,6 +2,7 @@ import logging
 import requests
 from fyers_apiv3 import fyersModel
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +66,7 @@ class FyersApiClient:
         data = {
             "symbol": symbol,
             "resolution": resolution,
-            "date_format": "1",
+            "date_format": "0",
             "range_from": range_from,
             "range_to": range_to,
             "cont_flag": "1",

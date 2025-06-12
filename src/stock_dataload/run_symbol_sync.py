@@ -4,16 +4,15 @@ import os
 from dotenv import load_dotenv
 import logging
 
-from ..common.logger import setup_logger
-from ..database.manager import DatabaseManager
-from .api_client import StockApiClient
-from .processor import SymbolMasterLoader
+from src.common.logger import setup_logger
+from src.database.manager import DatabaseManager
+from src.stock_dataload.api_client import StockApiClient
+from src.stock_dataload.processor import SymbolMasterLoader
 
 load_dotenv()
 
 
 def process_master_file(key, exchange, segment, config, api_client, loader):
-    """Generic helper to process one master file."""
     logger = logging.getLogger("stock_dataload")
     url = config["FYERS_MASTER_FILES"].get(key)
     if not url:
@@ -37,10 +36,6 @@ def process_master_file(key, exchange, segment, config, api_client, loader):
 
 
 def run_symbol_master_sync():
-    """
-    Main function to run the symbol master synchronization process using the new class.
-    """
-    # --- Setup ---
     project_root = Path(__file__).resolve().parent.parent.parent
     config = configparser.ConfigParser()
     config.read(project_root / "config" / "config.ini")
@@ -51,20 +46,15 @@ def run_symbol_master_sync():
     conn_str_template = config["DATABASE"]["connection_string"]
     db_connection_string = os.path.expandvars(conn_str_template)
 
-    # --- Initialization ---
     db_manager = DatabaseManager(db_connection_string)
     api_client = StockApiClient()
-    db_manager.create_tables()  # Ensure tables exist
-
-    # Create an instance of our new loader class
+    db_manager.create_tables()
     symbol_loader = SymbolMasterLoader(db_manager)
 
     logger.info("--- Starting Symbol Master Synchronization ---")
 
-    # --- Dataload Logic ---
     process_master_file("nse_cm", "NSE", "CM", config, api_client, symbol_loader)
     process_master_file("nse_fo", "NSE", "FO", config, api_client, symbol_loader)
-    # Add other files here as needed...
 
     logger.info("--- Symbol Master Synchronization Finished ---")
 

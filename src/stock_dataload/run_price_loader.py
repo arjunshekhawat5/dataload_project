@@ -1,24 +1,22 @@
 import os
 from dotenv import load_dotenv
-from sqlalchemy import select
 import configparser
 from pathlib import Path
 
-from ..common.logger import setup_logger
-from ..database.manager import DatabaseManager
-from ..database.models import Security
-from .api_client import FyersApiClient
-from .processor import PriceHistoryProcessor
+from src.common.logger import setup_logger
+from src.database.manager import DatabaseManager
+from src.database.models import Security
+from src.stock_dataload.api_client import FyersApiClient
+from src.stock_dataload.processor import PriceHistoryLoader
+from src.stock_dataload.data_fetcher import HistoricalDataFetcher
 
 load_dotenv()
 
 
-# --- RENAMED THIS FUNCTION from main() to be specific and importable ---
 def run_price_history_load():
     """
     Main function to run the daily price history dataload for all relevant securities.
     """
-    # --- Setup ---
     project_root = Path(__file__).resolve().parent.parent.parent
     config = configparser.ConfigParser()
     config.read(project_root / "config" / "config.ini")
@@ -28,7 +26,6 @@ def run_price_history_load():
 
     db_connection_string = os.path.expandvars(config["DATABASE"]["connection_string"])
 
-    # --- Initialization ---
     db_manager = DatabaseManager(db_connection_string)
     try:
         fyers_client = FyersApiClient(
@@ -39,9 +36,9 @@ def run_price_history_load():
         logger.error(f"Initialization failed: {e}")
         return
 
-    price_loader = PriceHistoryProcessor(db_manager, fyers_client)
+    data_fetcher = HistoricalDataFetcher(fyers_client)
+    price_loader = PriceHistoryLoader(db_manager, data_fetcher)
 
-    # --- Dataload Logic ---
     with db_manager.Session() as session:
         securities_to_load = (
             session.query(Security)
@@ -61,7 +58,7 @@ def run_price_history_load():
         logger.info(f"--- Processing {i + 1}/{total_securities}: {security.symbol} ---")
         for tf in timeframes_to_load:
             try:
-                price_loader.load_history(security, tf)
+                price_loader.load_history_for_security(security, tf)
             except Exception as e:
                 logger.error(
                     f"Critical error processing {security.symbol} for timeframe {tf}: {e}",
@@ -71,6 +68,5 @@ def run_price_history_load():
     logger.info("--- Price History Dataload Finished ---")
 
 
-# This block allows the script to be run directly for debugging if needed.
 if __name__ == "__main__":
     run_price_history_load()

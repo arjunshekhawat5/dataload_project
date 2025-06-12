@@ -1,6 +1,5 @@
 import logging
 from src.common.logger import setup_logger
-import os
 from pathlib import Path
 
 from src.stock_dataload.run_symbol_sync import run_symbol_master_sync
